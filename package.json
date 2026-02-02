@@ -1,0 +1,48 @@
+{
+  "name": "@digitalwalletcorp/redis-pooling",
+  "version": "1.0.0",
+  "description": "This is a library for redis connection pooling",
+  "main": "lib/index.js",
+  "types": "lib/index.d.ts",
+  "scripts": {
+    "build": "tsc --project tsconfig.build.json",
+    "version:patch": "npm version patch",
+    "version:minor": "npm version minor",
+    "version:major": "npm version major",
+    "prepack": "rm -rf lib && npm run build",
+    "pack": "rm -rf dest && mkdir -p dest && npm pack --pack-destination=dest",
+    "publish:npm": "bash ../bin/publish.sh",
+    "test:unit": "NODE_OPTIONS=--max-old-space-size=2048 npx jest --runInBand --logHeapUsage --detectOpenHandles --forceExit --errorOnDeprecated --coverage --silent --unhandled-rejections=strict"
+  },
+  "keywords": [
+    "redis",
+    "pooling"
+  ],
+  "author": "satoshi kotaki",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/digitalwalletcorp/redis-pooling.git"
+  },
+  "homepage": "https://github.com/digitalwalletcorp/redis-pooling",
+  "bugs": {
+    "url": "https://github.com/digitalwalletcorp/redis-pooling/issues"
+  },
+  "files": [
+    "lib/**/*",
+    "src/**/*"
+  ],
+  "devDependencies": {
+    "@types/ioredis-mock": "^8.2.6",
+    "@types/jest": "^29.5.14",
+    "ioredis-mock": "^8.13.1",
+    "jest": "^29.7.0",
+    "ts-jest": "^29.3.4",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.8.3"
+  },
+  "dependencies": {
+    "generic-pool": "^3.9.0",
+    "ioredis": "^5.9.2"
+  }
+}
