@@ -120,19 +120,25 @@ export const createRedisPool = (config: RedisConfig): ManagedRedisPool => {
         });
 
         return new Promise((resolve, reject) => {
+          const tasks: Promise<void>[] = [];
           stream.on('data', async (keys: string[]) => {
             if (keys.length) {
-              try {
-                // UNLINK を使用し、現在のインスタンス (this) で実行
-                const unlinkResult = await this.unlink(...keys);
-                deletedCount += unlinkResult;
-                console.log(logHeader, `Deleted ${unlinkResult} keys in a batch for pattern '${pattern}'. Total: ${deletedCount}`);
-              } catch (error: any) {
-                process.emitWarning(`${logHeader} Error during UNLINK for pattern '${pattern}'. ${error.message}`);
-              }
+              tasks.push((async () => {
+                try {
+                  // UNLINK を使用し、現在のインスタンス (this) で実行
+                  const unlinkResult = await this.unlink(...keys);
+                  deletedCount += unlinkResult;
+                  console.log(logHeader, `Deleted ${unlinkResult} keys in a batch for pattern '${pattern}'. Total: ${deletedCount}`);
+                } catch (error: any) {
+                  process.emitWarning(`${logHeader} Error during UNLINK for pattern '${pattern}'. ${error.message}`);
+                }
+              })());
             }
           });
-          stream.on('end', () => resolve(deletedCount));
+          stream.on('end', async () => {
+            await Promise.all(tasks);
+            resolve(deletedCount);
+          });
           stream.on('error', (err: Error) => {
             console.error(logHeader, `Error during deleteKeys scan for pattern '${pattern}'.`, err);
             reject(err);
