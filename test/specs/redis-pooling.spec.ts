@@ -12,7 +12,10 @@ jest.mock('ioredis', () => {
 
 const redisUrl = 'redis://localhost:6379';
 
-describe('Redis Pooling', () => {
+/**
+ * モックを利用したRedisPoolingのテスト
+ */
+describe('Redis Pooling Mock Tests', () => {
   describe('Normal Cases', () => {
     let pool: ReturnType<typeof createRedisPool>;
 
