@@ -12,7 +12,7 @@ export interface RedisConfig {
 }
 
 export interface ManagedRedisPool {
-  acquire(dbIndex?: number): Promise<Redis>;
+  acquire(dbIndex?: number): Promise<ManagedRedisClient>;
   release(client?: Redis): Promise<void>;
   destroy(timeoutMs?: number): Promise<void>;
 }
@@ -53,7 +53,7 @@ export const createRedisPool = (config: RedisConfig): ManagedRedisPool => {
 
   const createSingleDbPool = (dbIndex: number): genericPool.Pool<ManagedRedisClient> => {
     const factory: genericPool.Factory<ManagedRedisClient> = {
-      create: async () => {
+      create: async (): Promise<ManagedRedisClient> => {
         let client;
         try {
           client = new Redis(url, {

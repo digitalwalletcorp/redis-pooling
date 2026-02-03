@@ -1,4 +1,4 @@
-import { createRedisPool, ManagedRedisClient } from '@/redis-pooling';
+import { createRedisPool } from '@/redis-pooling';
 
 jest.mock('ioredis', () => {
   const RedisMock = require('ioredis-mock');
@@ -34,7 +34,7 @@ describe('Redis Pooling Mock Tests', () => {
     });
 
     it('acquire and release works', async () => {
-      const client = await pool.acquire() as ManagedRedisClient;
+      const client = await pool.acquire();
       expect(client).toBeDefined();
 
       await client.set('foo', 'bar');
@@ -45,7 +45,7 @@ describe('Redis Pooling Mock Tests', () => {
     });
 
     it('getKeys returns keys matching pattern', async () => {
-      const client = await pool.acquire() as ManagedRedisClient;
+      const client = await pool.acquire();
       await client.set('user:1', 'Alice');
       await client.set('user:2', 'Bob');
       const keys = await client.getKeys('user:*');
@@ -55,7 +55,7 @@ describe('Redis Pooling Mock Tests', () => {
     });
 
     it('deleteKeys removes keys and returns correct count', async () => {
-      const client = await pool.acquire() as ManagedRedisClient;
+      const client = await pool.acquire();
       await client.set('delete:1', 'x');
       await client.set('delete:2', 'y');
       await client.set('keep:1', 'z');
@@ -72,7 +72,7 @@ describe('Redis Pooling Mock Tests', () => {
 
 
     it('acquire with dbIndex works', async () => {
-      const client = await pool.acquire(1) as ManagedRedisClient; // db 1
+      const client = await pool.acquire(1); // db 1
       await client.set('db1key', 'value1');
 
       const val = await client.get('db1key');
@@ -82,8 +82,8 @@ describe('Redis Pooling Mock Tests', () => {
     });
 
     it('pool allows multiple clients up to max', async () => {
-      const client1 = await pool.acquire() as ManagedRedisClient;
-      const client2 = await pool.acquire() as ManagedRedisClient;
+      const client1 = await pool.acquire();
+      const client2 = await pool.acquire();
 
       await client1.set('a', '1');
       await client2.set('b', '2');
@@ -123,7 +123,7 @@ describe('Redis Pooling Mock Tests', () => {
     });
 
     it('getKeys handles scanStream error', async () => {
-      const client = await pool.acquire() as ManagedRedisClient;
+      const client = await pool.acquire();
 
       // scanStreamをエラーを出すモックに差し替え
       client.scanStream = () => {
@@ -138,7 +138,7 @@ describe('Redis Pooling Mock Tests', () => {
     });
 
     it('deleteKeys handles scanStream error', async () => {
-      const client = await pool.acquire() as ManagedRedisClient;
+      const client = await pool.acquire();
 
       client.scanStream = () => {
         const EventEmitter = require('events');
@@ -152,7 +152,7 @@ describe('Redis Pooling Mock Tests', () => {
     });
 
     it('deleteKeys handles UNLINK error', async () => {
-      const client = await pool.acquire() as ManagedRedisClient;
+      const client = await pool.acquire();
 
       // キーを1件返すスキャン
       client.scanStream = () => {
