@@ -28,7 +28,7 @@ yarn add @digitalwalletcorp/redis-pooling
 This pattern is ideal for short-lived Node.js scripts, such as cron jobs, where a pool is created, used, and destroyed within a single run.
 
 ```typescript
-import { createRedisPool, ManagedRedisClient } from '@digitalwalletcorp/redis-pooling';
+import { createRedisPool } from '@digitalwalletcorp/redis-pooling';
 
 const redisPool = createRedisPool({
   url: 'redis://localhost:6379',
@@ -40,7 +40,7 @@ const redisPool = createRedisPool({
 });
 
 async function main() {
-  const client: ManagedRedisClient = await redisPool.acquire();
+  const client = await redisPool.acquire();
   try {
     await client.set('key', 'value');
     const value = await client.get('key');
@@ -60,7 +60,7 @@ For long-running web applications, a singleton Redis pool ensures efficient reus
 
 `@/server/singleton/redis-pooling`
 ```typescript
-import { createRedisPool, ManagedRedisClient } from '@digitalwalletcorp/redis-pooling';
+import { createRedisPool } from '@digitalwalletcorp/redis-pooling';
 
 export const redisPool = createRedisPool({
   url: 'redis://localhost:6379',
@@ -77,7 +77,7 @@ export const redisPool = createRedisPool({
 import { redisPool } from '@/server/singleton/redis-pooling';
 
 async function handleRequest() {
-  const client: ManagedRedisClient = await redisPool.acquire();
+  const client = await redisPool.acquire();
   try {
     const value = await client.get('session:1234');
     console.log('Session value:', value);

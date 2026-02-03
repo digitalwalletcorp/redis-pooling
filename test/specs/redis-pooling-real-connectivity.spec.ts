@@ -34,7 +34,7 @@ describe.skip('Redis Pooling Real Connectivity Tests', () => {
     });
 
     it('一般的な操作', async () => {
-      const client = await pool.acquire() as ManagedRedisClient;
+      const client = await pool.acquire();
       try {
         // 最初に`tedis-pooling-test:`で始まるキーを全てクリア
         await clearTestKeys(client);
@@ -66,7 +66,7 @@ describe.skip('Redis Pooling Real Connectivity Tests', () => {
 
     it('途中でDBインデックスを選択', async () => {
       // DBインデックス1のRedisクライアントを取得
-      const client1 = await pool.acquire(1) as ManagedRedisClient;
+      const client1 = await pool.acquire(1);
       try {
         // 最初に`tedis-pooling-test:`で始まるキーを全てクリア
         await clearTestKeys(client1);
@@ -86,7 +86,7 @@ describe.skip('Redis Pooling Real Connectivity Tests', () => {
         await pool.release(client1);
       }
 
-      const client2 = await pool.acquire(1) as ManagedRedisClient;
+      const client2 = await pool.acquire(1);
       try {
         // さきほど登録したデータが参照できること→選択されているDBインデックスが期待通りであることの確認
         const v1 = await client2.get(`${prefix}:key1`);
@@ -98,7 +98,7 @@ describe.skip('Redis Pooling Real Connectivity Tests', () => {
 
     it('途中でプールを破棄', async () => {
       // DBインデックス1のRedisクライアントを取得
-      const client1 = await pool.acquire(1) as ManagedRedisClient;
+      const client1 = await pool.acquire(1);
       try {
         // 最初に`tedis-pooling-test:`で始まるキーを全てクリア
         await clearTestKeys(client1);
@@ -115,7 +115,7 @@ describe.skip('Redis Pooling Real Connectivity Tests', () => {
       // プールから再度クライアント取得
       // 一度破棄したプールを再利用するのは好ましくないが、
       // 単にマップが空になって新しくプールが生成されるだけなので技術的には使える状態にある
-      const client2 = await pool.acquire(1) as ManagedRedisClient;
+      const client2 = await pool.acquire(1);
       try {
         // さきほど登録したデータが参照できること→プールが正常に動作することの確認
         const v1 = await client2.get(`${prefix}:key1`);
@@ -125,12 +125,11 @@ describe.skip('Redis Pooling Real Connectivity Tests', () => {
       }
     });
 
-
     it('destroyの間違った使い方によるデッドロックエラー', async () => {
-      const client = await pool.acquire(1) as ManagedRedisClient;
+      const client = await pool.acquire(1);
       try {
         // クライアントリリース前にプールを破棄
-        expect(pool.destroy(100)).rejects.toThrow('Timeout while draining Redis pool for DB index 1');
+        await expect(pool.destroy(100)).rejects.toThrow('Timeout while draining Redis pool for DB index 1');
       } finally {
         await pool.release(client);
       }
