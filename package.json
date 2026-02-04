@@ -1,6 +1,6 @@
 {
   "name": "@digitalwalletcorp/redis-pooling",
-  "version": "1.0.1",
+  "version": "1.1.0",
   "description": "This is a library for redis connection pooling",
   "main": "lib/index.js",
   "types": "lib/index.d.ts",

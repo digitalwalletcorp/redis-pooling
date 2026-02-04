@@ -1,4 +1,4 @@
-import { createRedisPool } from '@/redis-pooling';
+import { RedisPool } from '@/redis-pooling';
 
 jest.mock('ioredis', () => {
   const RedisMock = require('ioredis-mock');
@@ -17,12 +17,12 @@ const redisUrl = 'redis://localhost:6379';
  */
 describe('Redis Pooling Mock Tests', () => {
   describe('Normal Cases', () => {
-    let pool: ReturnType<typeof createRedisPool>;
+    let pool: RedisPool;
 
     beforeEach(() => {
-      pool = createRedisPool({
+      pool = new RedisPool({
         url: redisUrl,
-        db: 0,
+        dbIndex: 0,
         max: 2,
         min: 0,
         testOnBorrow: false
@@ -101,12 +101,12 @@ describe('Redis Pooling Mock Tests', () => {
   });
 
   describe('Error Cases', () => {
-    let pool: ReturnType<typeof createRedisPool>;
+    let pool: RedisPool;
 
     beforeEach(() => {
-      pool = createRedisPool({
+      pool = new RedisPool({
         url: redisUrl,
-        db: 0,
+        dbIndex: 0,
         max: 1,
         min: 0,
         testOnBorrow: false,
@@ -119,7 +119,7 @@ describe('Redis Pooling Mock Tests', () => {
     });
 
     it('incorrect url', () => {
-      expect(() => createRedisPool({ url: '' })).toThrow('Redis connection url is required.');
+      expect(() => new RedisPool({ url: '' })).toThrow('Redis connection url is required.');
     });
 
     it('getKeys handles scanStream error', async () => {
