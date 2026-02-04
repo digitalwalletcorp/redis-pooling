@@ -10,10 +10,10 @@ Designed for both server-side Node.js applications and cron-style background job
 * **Connection Pooling**: Efficiently manage multiple Redis connections with `min` and `max` pool size configuration.
 * **Safe Acquire/Release**: Guaranteed handling of Redis client lifecycle with optional database selection (`SELECT dbIndex`).
 * **Custom Utilities**: Built-in helper methods like `getKeys(pattern)` and `deleteKeys(pattern)` for convenient Redis key operations.
-* **Connection Validation**: PING-based validation before borrowing from the pool.
+* **Connection Validation**: PING-based validation with timeout before borrowing from the pool.
 * **TLS Support**: Optional TLS configuration for secure Redis connections.
 
-#### 📦 Instllation
+#### 📦 Installation
 
 ```bash
 npm install @digitalwalletcorp/redis-pooling
@@ -28,15 +28,13 @@ yarn add @digitalwalletcorp/redis-pooling
 This pattern is ideal for short-lived Node.js scripts, such as cron jobs, where a pool is created, used, and destroyed within a single run.
 
 ```typescript
-import { createRedisPool } from '@digitalwalletcorp/redis-pooling';
+import { RedisPool } from '@digitalwalletcorp/redis-pooling';
 
-const redisPool = createRedisPool({
+const redisPool = new RedisPool({
   url: 'redis://localhost:6379',
-  db: 0,
+  dbIndex: 0,
   max: 10,
-  min: 2,
-  connectTimeout: 5000,
-  enableTls: false
+  min: 2
 });
 
 async function main() {
@@ -60,15 +58,13 @@ For long-running web applications, a singleton Redis pool ensures efficient reus
 
 `@/server/singleton/redis-pooling`
 ```typescript
-import { createRedisPool } from '@digitalwalletcorp/redis-pooling';
+import { RedisPool } from '@digitalwalletcorp/redis-pooling';
 
-export const redisPool = createRedisPool({
+export const redisPool = new RedisPool({
   url: 'redis://localhost:6379',
-  db: 0,
+  dbIndex: 0,
   max: 20,
-  min: 5,
-  connectTimeout: 5000,
-  enableTls: false
+  min: 5
 });
 ```
 
@@ -89,7 +85,7 @@ async function handleRequest() {
 
 ##### Example 3: Using Custom Methods (`getKeys`, `deleteKeys`)
 
-`ManagedRedisClient` extends the standard `ioredis` client with convenient helper methods.
+`RedisClient` extends the standard `ioredis` client with convenient helper methods.
 `getKeys` and `deleteKeys` use `SCAN` and `UNLINK` internally to avoid blocking Redis with large datasets (unlike `KEYS`).
 All other standard Redis commands remain available.
 
@@ -115,28 +111,29 @@ async function manageCache() {
 
 #### 📚 API Reference
 
-##### `createRedisPool(config: RedisConfig): ManagedRedisPool`
+##### `new RedisPool(config: RedisConfig)`
 
-Creates a managed Redis pool.
+Creates a Redis connection pool.
 
 | Property         | Type    | Default  | Description                            |
 | ---------------- | ------- | -------- | -------------------------------------- |
 | `url`            | string  | required | Redis connection URL.                  |
-| `db`             | number  | 0        | Default Redis database index.          |
-| `connectTimeout` | number  | 5000     | Connection timeout in milliseconds.    |
+| `dbIndex`        | number  | 0        | Default Redis database index.          |
 | `max`            | number  | 10       | Maximum number of clients in the pool. |
 | `min`            | number  | 0        | Minimum number of clients in the pool. |
+| `connectTimeout` | number  | 5000     | Connection timeout in milliseconds.    |
+| `testOnBorrow`   | boolean | true     | Enable connection validate on borrow.  |
 | `enableTls`      | boolean | false    | Enable TLS for Redis connection.       |
 
-##### `ManagedRedisPool` Methods
+##### `RedisPool` Methods
 
 | Method                                | Signature                     | Description                                                                            |
 | ------------------------------------- | ----------------------------- | -------------------------------------------------------------------------------------- |
-| `acquire(dbIndex?: number)`           | `Promise<ManagedRedisClient>` | Acquire a Redis client from the pool. Optionally switch to a different database index. |
-| `release(client: ManagedRedisClient)` | `Promise<void>`               | Release the Redis client back to the pool.                                             |
-| `destroy()`                           | `Promise<void>`               | Drain and clear all connections in the pool.                                           |
+| `acquire(dbIndex?: number)`           | `Promise<RedisClient>` | Acquire a Redis client from the pool. Optionally switch to a different database index. |
+| `release(client: RedisClient)`        | `Promise<void>`        | Release the Redis client back to the pool.                                             |
+| `destroy()`                           | `Promise<void>`        | Drain and clear all connections in the pool.                                           |
 
-##### `ManagedRedisClient` Methods
+##### `RedisClient` Methods
 
 Extends the standard `ioredis` `Redis` client with additional helpers:
 
@@ -144,6 +141,29 @@ Extends the standard `ioredis` `Redis` client with additional helpers:
 | ----------------------------- | ------------------- | ----------------------------------------------------------------------------------------------- |
 | `getKeys(pattern: string)`    | `Promise<string[]>` | Scan and return all keys matching a pattern.                                                    |
 | `deleteKeys(pattern: string)` | `Promise<number>`   | Scan and delete all keys matching a pattern using `UNLINK`. Returns the number of deleted keys. |
+
+#### 🗄 Database Index Handling
+
+This library provides a Redis connection pool capable of managing Redis clients
+connected to different database indexes (`SELECT db`).
+
+**Calling `acquire(dbIndex)`:**
+
+> When `dbIndex` is specified, the acquired client will be connected to the specified database index.
+
+**Calling `acquire()` without `dbIndex`:**
+> When `dbIndex` is not specified, the acquired client will be connected to the default database index configured when the pool was created via **createRedisPool({ dbIndex })**.
+
+```typescript
+// The default db index: 2
+const pool = new RedisPool({ url, dbIndex: 2 });
+
+// With dbIndex: connected to DB 1
+const client1 = await pool.acquire(1);
+
+// Without dbIndex: connected to DB 2 (default)
+const client2 = await pool.acquire();
+```
 
 ---
 #### 💡 Notes

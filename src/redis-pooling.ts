@@ -3,7 +3,7 @@ import * as genericPool from 'generic-pool';
 
 export interface RedisConfig {
   url: string;
-  db?: number;
+  dbIndex?: number;
   connectTimeout?: number;
   max?: number;
   min?: number;
@@ -11,13 +11,7 @@ export interface RedisConfig {
   enableTls?: boolean;
 }
 
-export interface ManagedRedisPool {
-  acquire(dbIndex?: number): Promise<ManagedRedisClient>;
-  release(client?: Redis): Promise<void>;
-  destroy(timeoutMs?: number): Promise<void>;
-}
-
-export interface ManagedRedisClient extends Redis {
+export interface RedisClient extends Redis {
   getKeys(pattern: string): Promise<string[]>;
   deleteKeys(pattern: string): Promise<number>;
   _originalDbIndex?: number; // 内部状態管理用変数
@@ -29,39 +23,115 @@ const DEFAULT_MAX_POOLING_SIZE = 10;
 const DEFAULT_MIN_POOLING_SIZE = 0;
 const REDIS_PING_TIMEOUT_MS = 3000; // 3秒
 
-/**
- * Redisコネクションプーリングを生成する
- *
- * @param {RedisConfig} config
- * @returns {ManagedRedisPool}
- */
-export const createRedisPool = (config: RedisConfig): ManagedRedisPool => {
+export class RedisPool {
 
-  const url = config.url;
-  const db = config.db ?? 0;
-  const connectTimeout = config.connectTimeout ?? DEFAULT_CONNECT_TIMEOUT;
-  const max = config.max ?? DEFAULT_MAX_POOLING_SIZE;
-  const min = config.min ?? DEFAULT_MIN_POOLING_SIZE;
-  const testOnBorrow = config.testOnBorrow ?? true;
+  private readonly url: string;
+  private readonly db: number;
+  private readonly connectTimeout: number;
+  private readonly max: number;
+  private readonly min: number;
+  private readonly testOnBorrow: boolean;
+  private readonly enableTls?: boolean;
 
-  if (!url) {
-    throw new Error(`${logHeader} Redis connection url is required.`);
+  private readonly poolMap = new Map<number, genericPool.Pool<RedisClient>>();
+
+  constructor(config: RedisConfig) {
+    if (!config.url) {
+      throw new Error(`${logHeader} Redis connection url is required.`);
+    }
+
+    this.url = config.url;
+    this.db = config.dbIndex ?? 0;
+    this.connectTimeout = config.connectTimeout ?? DEFAULT_CONNECT_TIMEOUT;
+    this.max = config.max ?? DEFAULT_MAX_POOLING_SIZE;
+    this.min = config.min ?? DEFAULT_MIN_POOLING_SIZE;
+    this.testOnBorrow = config.testOnBorrow ?? true;
+    this.enableTls = config.enableTls;
   }
 
-  // dbIndexごとのプール管理
-  const poolMap = new Map<number, genericPool.Pool<ManagedRedisClient>>();
+  public async acquire(dbIndex?: number): Promise<RedisClient> {
+    const index = dbIndex ?? this.db;
+    const pool = this.getPool(index);
+    const client = await pool.acquire();
 
-  const createSingleDbPool = (dbIndex: number): genericPool.Pool<ManagedRedisClient> => {
-    const factory: genericPool.Factory<ManagedRedisClient> = {
-      create: async (): Promise<ManagedRedisClient> => {
+    console.debug(logHeader, `Redis client ${index} has been acquired.`);
+    return client;
+  }
+
+  public async release(client?: RedisClient): Promise<void> {
+    if (client) {
+      const dbIndex = client._originalDbIndex ?? this.db;
+      const pool = this.poolMap.get(dbIndex);
+      if (!pool) {
+        return;
+      }
+      let needDestroy = false;
+      switch (true) {
+        case client.status === 'end':
+        case client.status === 'close':
+          // Redisクライアントの状態が再利用できない場合はプールから破棄
+          needDestroy = true;
+          break;
+        case client.status === 'ready':
+          try {
+            // 元のDBインデックスに戻す
+            await client.select(dbIndex);
+          } catch (error) {
+            // selectに失敗する→Redisクライアントが不正な状態にあると判断できるのでプールから破棄
+            needDestroy = true;
+          }
+          break;
+        default:
+      }
+      if (needDestroy) {
+        // Redisクライアントの破棄
+        await pool.destroy(client);
+        console.debug(logHeader, `Redis client ${dbIndex} destroyed due to invalid status.`);
+      } else {
+        // Redisクライアントの返却
+        await pool.release(client);
+        console.debug(logHeader, `Redis client ${dbIndex} released.`);
+      }
+    }
+  }
+
+  public async destroy(timeoutMs = 5000): Promise<void> {
+    for (const [dbIndex, pool] of this.poolMap.entries()) {
+      console.debug(logHeader, `Destroying Redis pool for DB index ${dbIndex}...`);
+      await Promise.race([
+        (async () => {
+          await pool.drain();
+          await pool.clear();
+        })(),
+        new Promise<void>((_, reject) => {
+          setTimeout(() => reject(new Error(`${logHeader} Timeout while draining Redis pool for DB index ${dbIndex}`)), timeoutMs);
+        })
+      ]);
+      console.debug(logHeader, `Redis pool for DB index ${dbIndex} destroyed.`);
+      this.poolMap.delete(dbIndex);
+    }
+  }
+
+  private getPool(dbIndex: number): genericPool.Pool<RedisClient> {
+    let pool = this.poolMap.get(dbIndex);
+    if (!pool) {
+      pool = this.createSingleDbPool(dbIndex);
+      this.poolMap.set(dbIndex, pool);
+    }
+    return pool;
+  }
+
+  private createSingleDbPool(dbIndex: number): genericPool.Pool<RedisClient> {
+    const factory: genericPool.Factory<RedisClient> = {
+      create: async (): Promise<RedisClient> => {
         let client;
         try {
-          client = new Redis(url, {
+          client = new Redis(this.url, {
             db: dbIndex,
-            connectTimeout: connectTimeout,
+            connectTimeout: this.connectTimeout,
             keepAlive: 1,
             enableOfflineQueue: true,
-            tls: config.enableTls ? { rejectUnauthorized: false } : undefined,
+            tls: this.enableTls ? { rejectUnauthorized: false } : undefined,
             retryStrategy: (times) => {
               const delay = Math.min(times * 50, 1000);
               if (process.env.NODE_ENV !== 'test') {
@@ -73,7 +143,7 @@ export const createRedisPool = (config: RedisConfig): ManagedRedisPool => {
               process.emitWarning(`${logHeader} detected error (on reconnect). ${error.message}`);
               return true;
             }
-          }) as ManagedRedisClient;
+          }) as RedisClient;
         } catch (error) {
           console.error(error);
           throw error;
@@ -203,79 +273,9 @@ export const createRedisPool = (config: RedisConfig): ManagedRedisPool => {
     };
 
     return genericPool.createPool(factory, {
-      max,
-      min,
-      testOnBorrow
+      max: this.max,
+      min: this.min,
+      testOnBorrow: this.testOnBorrow
     });
-  };
-
-  const getPool = (dbIndex: number) => {
-    let pool = poolMap.get(dbIndex);
-    if (!pool) {
-      pool = createSingleDbPool(dbIndex);
-      poolMap.set(dbIndex, pool);
-    }
-    return pool;
-  };
-
-  return {
-    acquire: async (dbIndex?: number): Promise<ManagedRedisClient> => {
-      const index = dbIndex ?? 0;
-      const pool = getPool(index);
-      const client = await pool.acquire();
-      console.debug(logHeader, `Redis client ${index} has been acquired.`);
-      return client;
-    },
-    release: async (client?: ManagedRedisClient): Promise<void> => {
-      if (client) {
-        const dbIndex = client._originalDbIndex ?? db;
-        let needDestroy = false;
-        switch (true) {
-          case client.status === 'end':
-          case client.status === 'close':
-            // Redisクライアントの状態が再利用できない場合はプールから破棄
-            needDestroy = true;
-            break;
-          case client.status === 'ready':
-            try {
-              // 元のDBインデックスに戻す
-              await client.select(dbIndex);
-            } catch (error) {
-              // selectに失敗する→Redisクライアントが不正な状態にあると判断できるのでプールから破棄
-              needDestroy = true;
-            }
-            break;
-          default:
-        }
-        const pool = poolMap.get(dbIndex);
-        if (pool) {
-          if (needDestroy) {
-            // Redisクライアントの破棄
-            await pool.destroy(client);
-            console.debug(logHeader, `Redis client ${dbIndex} destroyed due to invalid status.`);
-          } else {
-            // Redisクライアントの返却
-            await pool.release(client);
-            console.debug(logHeader, `Redis client ${dbIndex} released.`);
-          }
-        }
-      }
-    },
-    destroy: async (timeoutMs = 5000): Promise<void> => {
-      for (const [dbIndex, pool] of poolMap.entries()) {
-        console.debug(logHeader, `Destroying Redis pool for DB index ${dbIndex}...`);
-        await Promise.race([
-          (async () => {
-            await pool.drain();
-            await pool.clear();
-          })(),
-          new Promise<void>((_, reject) => {
-            setTimeout(() => reject(new Error(`${logHeader} Timeout while draining Redis pool for DB index ${dbIndex}`)), timeoutMs);
-          })
-        ]);
-        console.debug(logHeader, `Redis pool for DB index ${dbIndex} destroyed.`);
-        poolMap.delete(dbIndex);
-      }
-    }
   }
-};
+}

@@ -1,4 +1,4 @@
-import { createRedisPool, ManagedRedisClient } from '@/redis-pooling';
+import { RedisPool } from '@/redis-pooling';
 
 // 実接続テストなのでタイムアウトを延伸
 jest.setTimeout(60 * 1000);
@@ -12,16 +12,16 @@ const prefix = 'redis-pooling-test';
 describe.skip('Redis Pooling Real Connectivity Tests', () => {
 
   describe('Real connectivity', () => {
-    let pool: ReturnType<typeof createRedisPool>;
+    let pool: RedisPool;
 
     beforeEach(() => {
       // 環境変数に実際に接続可能なURLを定義するか、テストコードを書き換えてテストを実施する
       // URLの形式は`redis://:{password}@{host}:{port}`
       const url = process.env.REDIS_URL as string;
       console.log(url);
-      pool = createRedisPool({
+      pool = new RedisPool({
         url: url,
-        db: 0,
+        dbIndex: 0,
         max: 1,
         min: 0,
         enableTls: true,
@@ -37,7 +37,7 @@ describe.skip('Redis Pooling Real Connectivity Tests', () => {
       const client = await pool.acquire();
       try {
         // 最初に`tedis-pooling-test:`で始まるキーを全てクリア
-        await clearTestKeys(client);
+        await client.deleteKeys(`${prefix}:*`);
 
         // 1つめのキーを登録
         await client.set(`${prefix}:key1`, '123');
@@ -69,7 +69,7 @@ describe.skip('Redis Pooling Real Connectivity Tests', () => {
       const client1 = await pool.acquire(1);
       try {
         // 最初に`tedis-pooling-test:`で始まるキーを全てクリア
-        await clearTestKeys(client1);
+        await client1.deleteKeys(`${prefix}:*`);
 
         // キーを登録
         await client1.set(`${prefix}:key1`, '123');
@@ -101,7 +101,7 @@ describe.skip('Redis Pooling Real Connectivity Tests', () => {
       const client1 = await pool.acquire(1);
       try {
         // 最初に`tedis-pooling-test:`で始まるキーを全てクリア
-        await clearTestKeys(client1);
+        await client1.deleteKeys(`${prefix}:*`);
 
         // キーを登録
         await client1.set(`${prefix}:key1`, '123');
@@ -134,17 +134,49 @@ describe.skip('Redis Pooling Real Connectivity Tests', () => {
         await pool.release(client);
       }
     });
+
+    it('pool作成時のDBインデックスがデフォルトで設定される', async () => {
+      // テスト用乱数生成
+      const randomValue = Math.random().toString(36).slice(2, 12);
+      console.log(randomValue);
+
+      // 初期インデックス2で別のプールを作成
+      const url = process.env.REDIS_URL as string;
+      const redisPool = new RedisPool({
+        url: url,
+        dbIndex: 2,
+        max: 1,
+        min: 0,
+        enableTls: true,
+        testOnBorrow: true
+      });
+      try {
+        // DBインデックス指定なしでacquire呼び出し
+        const client1 = await redisPool.acquire();
+        try {
+          // テストデータクリア
+        await client1.deleteKeys(`${prefix}:*`);
+
+          // キーを登録
+          await client1.set(`${prefix}:key1`, randomValue);
+          const v1 = await client1.get(`${prefix}:key1`);
+          expect(v1).toBe(randomValue);
+        } finally {
+          await redisPool.release(client1);
+        }
+      } finally {
+        await redisPool.destroy();
+      }
+
+      // 初期で作成しているプールからDBインデックス2でクライアント取得
+      const client2 = await pool.acquire(2);
+      try {
+        // 最初の処理がDBインデックス2にデータを登録していることを確認
+        const v2 = await client2.get(`${prefix}:key1`);
+        expect(v2).toBe(randomValue);
+      } finally {
+        await pool.release(client2);
+      }
+    });
   });
 });
-
-/**
- * 現在選択されているDBインデックスからprefixで始まるデータを削除する
- *
- * @param {ManagedRedisClient} client
- */
-const clearTestKeys = async (client: ManagedRedisClient): Promise<void> => {
-  const keys = await client.getKeys(`${prefix}:*`);
-  for (const key of keys) {
-    await client.del(key);
-  }
-};
