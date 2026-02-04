@@ -18,14 +18,12 @@ describe.skip('Redis Pooling Real Connectivity Tests', () => {
       // 環境変数に実際に接続可能なURLを定義するか、テストコードを書き換えてテストを実施する
       // URLの形式は`redis://:{password}@{host}:{port}`
       const url = process.env.REDIS_URL as string;
-      console.log(url);
       pool = new RedisPool({
         url: url,
         dbIndex: 0,
         max: 1,
         min: 0,
-        enableTls: true,
-        testOnBorrow: true
+        enableTls: true
       });
     });
 
@@ -54,8 +52,20 @@ describe.skip('Redis Pooling Real Connectivity Tests', () => {
         expect(accKeys1.length).toBe(2);
 
         // キーを削除
-        const delCount = await client.deleteKeys(`${prefix}:*`);
+        const delResults = await client.deleteKeys(`${prefix}:*`);
+        expect(delResults).toEqual([
+          {
+            status: 'fulfilled',
+            value: 2
+          }
+        ]);
+        const succeeded = delResults.filter(a => a.status === 'fulfilled');
+        console.log(succeeded.map(a => a.value));
+        expect(succeeded.length).toBe(1);
+        const delCount = succeeded.reduce((acc, cur) => acc + (cur as PromiseFulfilledResult<number>).value, 0);
         expect(delCount).toBe(2);
+        const failed = delResults.filter(a => a.status === 'rejected');
+        expect(failed.length).toBe(0);
 
         const accKeys2 = await client.getKeys(`${prefix}:*`);
         expect(accKeys2.length).toBe(0);
@@ -147,8 +157,7 @@ describe.skip('Redis Pooling Real Connectivity Tests', () => {
         dbIndex: 2,
         max: 1,
         min: 0,
-        enableTls: true,
-        testOnBorrow: true
+        enableTls: true
       });
       try {
         // DBインデックス指定なしでacquire呼び出し
@@ -176,6 +185,57 @@ describe.skip('Redis Pooling Real Connectivity Tests', () => {
         expect(v2).toBe(randomValue);
       } finally {
         await pool.release(client2);
+      }
+    });
+
+    it('パスワード不正(接続不可)', async () => {
+      const url = process.env.REDIS_URL as string;
+      const urlObject = new URL(url);
+      urlObject.password = 'invalid-password';
+      const redisPool = new RedisPool({
+        url: urlObject.toString(),
+        max: 1,
+        min: 0,
+        enableTls: true
+      });
+      try {
+        await expect(redisPool.acquire()).rejects.toThrow('WRONGPASS');
+      } finally {
+        await redisPool.destroy();
+      }
+    });
+
+    it('ホスト不正(接続不可)', async () => {
+      const url = process.env.REDIS_URL as string;
+      const urlObject = new URL(url);
+      urlObject.hostname = 'invalid-host';
+      const redisPool = new RedisPool({
+        url: urlObject.toString(),
+        max: 1,
+        min: 0,
+        enableTls: true
+      });
+      try {
+        await expect(redisPool.acquire()).rejects.toThrow('ENOTFOUND');
+      } finally {
+        await redisPool.destroy();
+      }
+    });
+
+    it('TLS不正(接続不可)', async () => {
+      // SSLが要求されているRedisに非SSLで接続した時のエラー
+      // SSLハンドシェイクの間待ち時間が発生するため、即座にエラーにはならずデフォルトでは10秒ほどかかる
+      const url = process.env.REDIS_URL as string;
+      const redisPool = new RedisPool({
+        url: url,
+        max: 1,
+        min: 0,
+        enableTls: false
+      });
+      try {
+        await expect(redisPool.acquire()).rejects.toThrow(/ECONNRESET|handshake|SSL/);
+      } finally {
+        await redisPool.destroy();
       }
     });
   });
