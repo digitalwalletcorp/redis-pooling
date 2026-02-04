@@ -13,7 +13,7 @@ export interface RedisConfig {
 
 export interface RedisClient extends Redis {
   getKeys(pattern: string): Promise<string[]>;
-  deleteKeys(pattern: string): Promise<number>;
+  deleteKeys(pattern: string): Promise<PromiseSettledResult<number>[]>;
   _originalDbIndex?: number; // 内部状態管理用変数
 }
 
@@ -31,11 +31,15 @@ export class RedisPool {
   private readonly max: number;
   private readonly min: number;
   private readonly testOnBorrow: boolean;
-  private readonly enableTls?: boolean;
+  private readonly tls?: { rejectUnauthorized: false };
 
   private readonly poolMap = new Map<number, genericPool.Pool<RedisClient>>();
+  private initialized = false;
+  private readonly debug: boolean;
 
-  constructor(config: RedisConfig) {
+  constructor(config: RedisConfig, options?: {
+    debug?: boolean;
+  }) {
     if (!config.url) {
       throw new Error(`${logHeader} Redis connection url is required.`);
     }
@@ -46,16 +50,30 @@ export class RedisPool {
     this.max = config.max ?? DEFAULT_MAX_POOLING_SIZE;
     this.min = config.min ?? DEFAULT_MIN_POOLING_SIZE;
     this.testOnBorrow = config.testOnBorrow ?? true;
-    this.enableTls = config.enableTls;
+    this.tls = config.enableTls ? { rejectUnauthorized: false } : undefined;
+
+    this.debug = options?.debug ?? false;
   }
 
   public async acquire(dbIndex?: number): Promise<RedisClient> {
+    if (!this.initialized) {
+      // 初回acquire呼び出し時のみ接続チェックを行う
+      // ホスト不正やパスワード不正による接続不可等を検知する
+      // ※ generic-poolのfactoryの方に入ってしまうとエラーを呼び出し元に伝播させることが難しいため、プールとは別の接続でチェックする
+      await this.checkConnectivity(dbIndex ?? this.db);
+      this.initialized = true;
+    }
+
     const index = dbIndex ?? this.db;
     const pool = this.getPool(index);
-    const client = await pool.acquire();
+    try {
+      const client = await pool.acquire();
 
-    console.debug(logHeader, `Redis client ${index} has been acquired.`);
-    return client;
+      this.debugLog(logHeader, `Redis client ${index} has been acquired.`);
+      return client;
+    } catch (error) {
+      throw error;
+    }
   }
 
   public async release(client?: RedisClient): Promise<void> {
@@ -86,18 +104,18 @@ export class RedisPool {
       if (needDestroy) {
         // Redisクライアントの破棄
         await pool.destroy(client);
-        console.debug(logHeader, `Redis client ${dbIndex} destroyed due to invalid status.`);
+        this.debugLog(logHeader, `Redis client ${dbIndex} destroyed due to invalid status.`);
       } else {
         // Redisクライアントの返却
         await pool.release(client);
-        console.debug(logHeader, `Redis client ${dbIndex} released.`);
+        this.debugLog(logHeader, `Redis client ${dbIndex} released.`);
       }
     }
   }
 
   public async destroy(timeoutMs = 5000): Promise<void> {
     for (const [dbIndex, pool] of this.poolMap.entries()) {
-      console.debug(logHeader, `Destroying Redis pool for DB index ${dbIndex}...`);
+      this.debugLog(logHeader, `Destroying Redis pool for DB index ${dbIndex}...`);
       await Promise.race([
         (async () => {
           await pool.drain();
@@ -107,8 +125,63 @@ export class RedisPool {
           setTimeout(() => reject(new Error(`${logHeader} Timeout while draining Redis pool for DB index ${dbIndex}`)), timeoutMs);
         })
       ]);
-      console.debug(logHeader, `Redis pool for DB index ${dbIndex} destroyed.`);
+      this.debugLog(logHeader, `Redis pool for DB index ${dbIndex} destroyed.`);
       this.poolMap.delete(dbIndex);
+    }
+  }
+
+  /**
+   * 初めてacquireが呼ばれた時に、指定された接続情報で接続できるかチェックする
+   *
+   * @param {number} dbIndex
+   */
+  private async checkConnectivity(dbIndex: number): Promise<void> {
+    const client = new Redis(this.url, {
+      db: dbIndex,
+      retryStrategy: () => null,     // 再接続無効
+      reconnectOnError: () => false, // 再接続無効
+      connectTimeout: this.connectTimeout,
+      tls: this.tls,
+    });
+
+    return new Promise<void>((resolve, reject) => {
+      const cleanup = () => {
+        client.quit().catch(() => client.disconnect());
+      };
+
+      client.once('ready', () => {
+        cleanup();
+        resolve();
+      });
+
+      client.once('error', (error) => {
+        cleanup();
+        reject(error);
+      });
+    });
+  }
+
+  private async ping(client: Redis): Promise<boolean> {
+    try {
+      this.debugLog(logHeader, 'start validate');
+      const timeout = new Promise<void>((_, reject) => {
+        setTimeout(() => reject(new Error(`Redis PING timeout after ${REDIS_PING_TIMEOUT_MS}ms`)), REDIS_PING_TIMEOUT_MS);
+      });
+      await Promise.race([
+        client.ping(),
+        timeout
+      ]);
+      this.debugLog(logHeader, 'ping succeeded');
+      return client.status === 'ready';
+    } catch (error: any) {
+      this.debugLog(logHeader, 'ping failed');
+      return false;
+    }
+  }
+
+  public debugLog(...args: any[]): void {
+    if (this.debug) {
+      console.debug(...args);
     }
   }
 
@@ -124,35 +197,32 @@ export class RedisPool {
   private createSingleDbPool(dbIndex: number): genericPool.Pool<RedisClient> {
     const factory: genericPool.Factory<RedisClient> = {
       create: async (): Promise<RedisClient> => {
-        let client;
-        try {
-          client = new Redis(this.url, {
-            db: dbIndex,
-            connectTimeout: this.connectTimeout,
-            keepAlive: 1,
-            enableOfflineQueue: true,
-            tls: this.enableTls ? { rejectUnauthorized: false } : undefined,
-            retryStrategy: (times) => {
-              const delay = Math.min(times * 50, 1000);
-              if (process.env.NODE_ENV !== 'test') {
-                console.debug(logHeader, `retry strategy called ${times} times. delaying ${delay}ms`);
-              }
-              return delay;
-            },
-            reconnectOnError: (error) => {
-              process.emitWarning(`${logHeader} detected error (on reconnect). ${error.message}`);
-              return true;
+        const client = new Redis(this.url, {
+          db: dbIndex,
+          connectTimeout: this.connectTimeout,
+          keepAlive: 1,
+          enableOfflineQueue: true,
+          tls: this.tls,
+          retryStrategy: (times) => {
+            const delay = Math.min(times * 50, 1000);
+            if (process.env.NODE_ENV !== 'test') {
+              this.debugLog(logHeader, `retry strategy called ${times} times. delaying ${delay}ms`);
             }
-          }) as RedisClient;
-        } catch (error) {
-          console.error(error);
-          throw error;
-        }
+            return delay;
+          },
+          reconnectOnError: (error) => {
+            process.emitWarning(`${logHeader} detected error (on reconnectOnError). ${error.message}`);
+            return true;
+          }
+        }) as RedisClient;
 
         client._originalDbIndex = dbIndex;
         client.on('error', error => {
           process.emitWarning(`${logHeader} detected error (on error). ${error.message}`);
         });
+
+        // カスタムメソッド内の処理でthis.debugLogなどが参照できなくなるため、poolのインスタンスを変数キャプチャする
+        const poolInstance = this;
 
         // カスタムメソッド START
 
@@ -177,46 +247,50 @@ export class RedisPool {
             });
             stream.on('end', () => resolve(allKeys));
             stream.on('error', (err: Error) => {
-              console.error(logHeader, `Error during getKeys scan for pattern '${pattern}'.`, err);
               reject(err);
             });
           });
         };
         /**
          * 指定されたパターンに一致するキーを Redis から全て削除する (UNLINKを使用)
+         * 返却値の配列サイズはscanStreamが'data'を受信した回数で、この受信したデータで削除された件数がvalueに設定されている。
+         *
+         * [
+         *   { status: 'fulfilled', value: 100 }, // 1バッチ目で100件削除
+         *   { status: 'fulfilled', value: 80 } // 2バッチ目で80件削除
+         * ]
+         *
+         *  成功した件数は以下のようにして取得可能
+         *
+         * const delResults = await redisClient.deleteKeys('pattern');
+         * const delCount = delResults.filter(a => a.status === 'fulfilled')
+         *   .reduce((acc, cur) => acc + (cur as PromiseFulfilledResult<number>).value, 0);
          *
          * @param {string} pattern
-         * @returns {Promise<number>}
+         * @returns {Promise<PromiseSettledResult<number>>}
          */
-        client.deleteKeys = async function(pattern: string): Promise<number> {
-          let deletedCount = 0;
+        client.deleteKeys = async function(pattern: string): Promise<PromiseSettledResult<number>[]> {
           const stream = this.scanStream({
             match: pattern,
             count: 1000 // 1度にスキャンする件数
           });
 
           return new Promise((resolve, reject) => {
-            const tasks: Promise<void>[] = [];
+            const tasks: Promise<number>[] = [];
             stream.on('data', async (keys: string[]) => {
               if (keys.length) {
                 tasks.push((async () => {
-                  try {
-                    // UNLINK を使用し、現在のインスタンス (this) で実行
-                    const unlinkResult = await this.unlink(...keys);
-                    deletedCount += unlinkResult;
-                    console.debug(logHeader, `Deleted ${unlinkResult} keys in a batch for pattern '${pattern}'. Total: ${deletedCount}`);
-                  } catch (error: any) {
-                    process.emitWarning(`${logHeader} Error during UNLINK for pattern '${pattern}'. ${error.message}`);
-                  }
+                  // UNLINK を使用し、現在のインスタンス (this) で実行
+                  const unlinkResult = await this.unlink(...keys);
+                  return unlinkResult;
                 })());
               }
             });
             stream.on('end', async () => {
-              await Promise.all(tasks);
-              resolve(deletedCount);
+              const results = await Promise.allSettled(tasks);
+              resolve(results);
             });
             stream.on('error', (err: Error) => {
-              console.error(logHeader, `Error during deleteKeys scan for pattern '${pattern}'.`, err);
               reject(err);
             });
           });
@@ -247,28 +321,14 @@ export class RedisPool {
       destroy: async (client: Redis) => {
         try {
           await client.quit();
-          console.debug(logHeader, 'client quit');
+          this.debugLog(logHeader, 'client quit');
         } catch (error) {
           client.disconnect();
-          console.debug(logHeader, 'client disconnected');
+          this.debugLog(logHeader, 'client disconnected');
         }
       },
       validate: async (client: Redis) => {
-        try {
-          console.debug(logHeader, 'start validate');
-          const timeout = new Promise<void>((_, reject) => {
-            setTimeout(() => reject(new Error(`Redis PING timeout after ${REDIS_PING_TIMEOUT_MS}ms`)), REDIS_PING_TIMEOUT_MS);
-          });
-          await Promise.race([
-            client.ping(),
-            timeout
-          ]);
-          console.debug(logHeader, 'ping succeeded');
-          return client.status === 'ready';
-        } catch (error) {
-          console.debug(logHeader, 'ping failed');
-          return false;
-        }
+        return await this.ping(client);
       }
     };
 

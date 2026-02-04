@@ -101,8 +101,10 @@ async function manageCache() {
     console.log('Matching keys:', keys);
 
     // Delete all matching keys using UNLINK
-    const deleted = await client.deleteKeys('cache:*');
-    console.log(`Deleted ${deleted} keys`);
+    const delResults = await client.deleteKeys('cache:*');
+    const succeeded = delResults.filter(a => a.status === 'fulfilled');
+    const delCount = succeeded.reduce((acc, cur) => acc + (cur as PromiseFulfilledResult<number>).value, 0);
+    console.log(`Deleted ${delCount} keys`);
   } finally {
     await redisPool.release(client);
   }
@@ -140,7 +142,7 @@ Extends the standard `ioredis` `Redis` client with additional helpers:
 | Method                        | Signature           | Description                                                                                     |
 | ----------------------------- | ------------------- | ----------------------------------------------------------------------------------------------- |
 | `getKeys(pattern: string)`    | `Promise<string[]>` | Scan and return all keys matching a pattern.                                                    |
-| `deleteKeys(pattern: string)` | `Promise<number>`   | Scan and delete all keys matching a pattern using `UNLINK`. Returns the number of deleted keys. |
+| `deleteKeys(pattern: string)` | `Promise<PromiseSettledResult<number>[]>`   | Scan and delete all keys matching a pattern using `UNLINK`. Returns an array of results, one for each batch processed by `UNLINK`. Each result contains the number of keys deleted in that batch. |
 
 #### 🗄 Database Index Handling
 
