@@ -231,4 +231,143 @@ describe('Redis Pooling Mock Tests', () => {
     //   await pool.release(client);
     // });
   });
+
+  describe('Logging', () => {
+    const createLogger = () => ({
+      debug: jest.fn(),
+      info: jest.fn(),
+      warn: jest.fn(),
+      error: jest.fn()
+    });
+    const config = {
+      url: redisUrl,
+      max: 1,
+      min: 0,
+      testOnBorrow: false
+    };
+
+    it('default logger does not output to console when debug is false', async () => {
+      const debugSpy = jest.spyOn(console, 'debug').mockImplementation(() => undefined);
+      const infoSpy = jest.spyOn(console, 'info').mockImplementation(() => undefined);
+      try {
+        const pool = new RedisPool(config);
+        const client = await pool.acquire();
+        await pool.release(client);
+        await pool.destroy();
+        expect(debugSpy).not.toHaveBeenCalled();
+        expect(infoSpy).not.toHaveBeenCalled();
+      } finally {
+        debugSpy.mockRestore();
+        infoSpy.mockRestore();
+      }
+    });
+
+    it('default logger outputs to console when debug is true', async () => {
+      const debugSpy = jest.spyOn(console, 'debug').mockImplementation(() => undefined);
+      const infoSpy = jest.spyOn(console, 'info').mockImplementation(() => undefined);
+      try {
+        const pool = new RedisPool(config, { debug: true });
+        const client = await pool.acquire();
+        await pool.release(client);
+        await pool.destroy();
+        expect(debugSpy).toHaveBeenCalledWith('[RedisPooling]', 'Redis client 0 has been acquired.');
+        expect(infoSpy).toHaveBeenCalledWith('[RedisPooling]', 'Redis pool destroyed.');
+      } finally {
+        debugSpy.mockRestore();
+        infoSpy.mockRestore();
+      }
+    });
+
+    it('injected logger receives acquire/release logs at debug level regardless of the debug flag', async () => {
+      const logger = createLogger();
+      const pool = new RedisPool(config, { logger });
+      const client = await pool.acquire();
+      await pool.release(client);
+      await pool.destroy();
+      expect(logger.debug).toHaveBeenCalledWith('[RedisPooling]', 'Redis client 0 has been acquired.');
+      expect(logger.debug).toHaveBeenCalledWith('[RedisPooling]', 'Redis client released.');
+      expect(logger.info).toHaveBeenCalledWith('[RedisPooling]', 'Destroying Redis pool...');
+      expect(logger.info).toHaveBeenCalledWith('[RedisPooling]', 'Redis pool destroyed.');
+    });
+
+    it('injected logger receives acquire/release logs at info level when acquireLogLevel is info', async () => {
+      const logger = createLogger();
+      const pool = new RedisPool(config, { logger, acquireLogLevel: 'info' });
+      const client = await pool.acquire();
+      await pool.release(client);
+      await pool.destroy();
+      expect(logger.info).toHaveBeenCalledWith('[RedisPooling]', 'Redis client 0 has been acquired.');
+      expect(logger.info).toHaveBeenCalledWith('[RedisPooling]', 'Redis client released.');
+      expect(logger.debug).not.toHaveBeenCalledWith('[RedisPooling]', 'Redis client released.');
+    });
+
+    it('client error event is logged at error level', async () => {
+      const logger = createLogger();
+      const pool = new RedisPool(config, { logger });
+      const client = await pool.acquire();
+      const error = new Error('connection lost');
+      client.emit('error', error);
+      expect(logger.error).toHaveBeenCalledWith('[RedisPooling]', 'detected error (on error)', error);
+      await pool.release(client);
+      await pool.destroy();
+    });
+
+    it('default logger emits warnings and errors via process.emitWarning', async () => {
+      const emitWarningSpy = jest.spyOn(process, 'emitWarning').mockImplementation(() => undefined);
+      try {
+        const pool = new RedisPool(config);
+        const client = await pool.acquire();
+        client.emit('error', new Error('connection lost'));
+        expect(emitWarningSpy).toHaveBeenCalledWith(expect.stringContaining('detected error (on error)'));
+        await pool.release(client);
+        await pool.destroy();
+      } finally {
+        emitWarningSpy.mockRestore();
+      }
+    });
+  });
+
+  describe('Ping', () => {
+    it('clears the timeout timer when PING succeeds', async () => {
+      const logger = {
+        debug: jest.fn(),
+        info: jest.fn(),
+        warn: jest.fn(),
+        error: jest.fn()
+      };
+      const pool = new RedisPool({ url: redisUrl, max: 1, min: 0, testOnBorrow: false }, { logger });
+      const client = await pool.acquire();
+      const clearTimeoutSpy = jest.spyOn(global, 'clearTimeout');
+      try {
+        await (pool as any).ping(client);
+        expect(logger.debug).toHaveBeenCalledWith('[RedisPooling]', 'ping succeeded');
+        expect(clearTimeoutSpy).toHaveBeenCalledTimes(1);
+      } finally {
+        clearTimeoutSpy.mockRestore();
+        await pool.release(client);
+        await pool.destroy();
+      }
+    });
+
+    it('logs ping failure at warn level', async () => {
+      const logger = {
+        debug: jest.fn(),
+        info: jest.fn(),
+        warn: jest.fn(),
+        error: jest.fn()
+      };
+      const pool = new RedisPool({ url: redisUrl, max: 1, min: 0, testOnBorrow: false }, { logger });
+      const client = await pool.acquire();
+      const error = new Error('ping boom');
+      const pingSpy = jest.spyOn(client, 'ping').mockRejectedValueOnce(error);
+      try {
+        await expect((pool as any).ping(client)).resolves.toBe(false);
+        expect(logger.warn).toHaveBeenCalledWith('[RedisPooling]', 'ping failed', error);
+      } finally {
+        pingSpy.mockRestore();
+        await pool.release(client);
+        await pool.destroy();
+      }
+    });
+  });
 });

@@ -1,3 +1,4 @@
+import util from 'util';
 import { Redis } from 'ioredis';
 import * as genericPool from 'generic-pool';
 
@@ -12,8 +13,24 @@ export interface RedisConfig {
   enableTls?: boolean;
 }
 
+/**
+ * ログの出力先
+ * 渡した場合、どのレベルを出力するかはこのロガーが決める
+ */
+export interface RedisPoolLogger {
+  debug(...args: any[]): void;
+  info(...args: any[]): void;
+  warn(...args: any[]): void;
+  error(...args: any[]): void;
+}
+
 export interface RedisPoolOptions {
+  /** ログの出力先。未指定の場合はconsole(debug/info)とprocess.emitWarning(warn/error)に出力する */
+  logger?: RedisPoolLogger;
+  /** loggerを渡さない場合のみ有効。trueの場合はdebug/infoも出力する */
   debug?: boolean;
+  /** クライアントの貸出・返却ログを出力するレベル */
+  acquireLogLevel?: 'debug' | 'info';
 }
 
 export interface RedisClient extends Redis {
@@ -28,6 +45,30 @@ const DEFAULT_MAX_POOLING_SIZE = 10;
 const DEFAULT_MIN_POOLING_SIZE = 0;
 const REDIS_PING_TIMEOUT_MS = 3000; // 3秒
 
+/**
+ * loggerが渡されなかった場合のロガー
+ * 警告とエラーは呼び出し元が--no-warningsやprocess.on('warning')で抑止・捕捉できるようにprocess.emitWarningで出力する
+ *
+ * @param {boolean} debug trueの場合はdebug/infoもconsoleに出力する
+ * @returns {RedisPoolLogger}
+ */
+function createDefaultLogger(debug: boolean): RedisPoolLogger {
+  return {
+    debug: (...args: any[]) => {
+      if (debug) {
+        console.debug(...args);
+      }
+    },
+    info: (...args: any[]) => {
+      if (debug) {
+        console.info(...args);
+      }
+    },
+    warn: (...args: any[]) => process.emitWarning(util.format(...args)),
+    error: (...args: any[]) => process.emitWarning(util.format(...args))
+  };
+}
+
 export class RedisPool {
 
   private readonly url: string;
@@ -41,7 +82,8 @@ export class RedisPool {
 
   private pool?: genericPool.Pool<RedisClient>;
   private initialized = false;
-  private readonly debug: boolean;
+  private readonly logger: RedisPoolLogger;
+  private readonly acquireLogLevel: 'debug' | 'info';
 
   constructor(config: RedisConfig, options?: RedisPoolOptions) {
     if (!config.url) {
@@ -57,7 +99,8 @@ export class RedisPool {
     this.testOnBorrow = config.testOnBorrow ?? true;
     this.tls = config.enableTls ? { rejectUnauthorized: false } : undefined;
 
-    this.debug = options?.debug ?? false;
+    this.logger = options?.logger ?? createDefaultLogger(options?.debug ?? false);
+    this.acquireLogLevel = options?.acquireLogLevel ?? 'debug';
   }
 
   public async acquire(dbIndex?: number): Promise<RedisClient> {
@@ -79,7 +122,7 @@ export class RedisPool {
       await pool.destroy(client);
       throw error;
     }
-    this.debugLog(logHeader, `Redis client ${index} has been acquired.`);
+    this.acquireLog(logHeader, `Redis client ${index} has been acquired.`);
     return client;
   }
 
@@ -90,10 +133,10 @@ export class RedisPool {
     if (client.status === 'end' || client.status === 'close') {
       // 再利用できない状態のRedisクライアントはプールから破棄する
       await this.pool.destroy(client);
-      this.debugLog(logHeader, 'Redis client destroyed due to invalid status.');
+      this.acquireLog(logHeader, 'Redis client destroyed due to invalid status.');
     } else {
       await this.pool.release(client);
-      this.debugLog(logHeader, 'Redis client released.');
+      this.acquireLog(logHeader, 'Redis client released.');
     }
   }
 
@@ -102,7 +145,7 @@ export class RedisPool {
     if (!pool) {
       return;
     }
-    this.debugLog(logHeader, 'Destroying Redis pool...');
+    this.logger.info(logHeader, 'Destroying Redis pool...');
     let timer: NodeJS.Timeout | undefined;
     try {
       await Promise.race([
@@ -117,7 +160,7 @@ export class RedisPool {
     } finally {
       clearTimeout(timer);
     }
-    this.debugLog(logHeader, 'Redis pool destroyed.');
+    this.logger.info(logHeader, 'Redis pool destroyed.');
     this.pool = undefined;
   }
 
@@ -170,27 +213,30 @@ export class RedisPool {
   }
 
   private async ping(client: Redis): Promise<boolean> {
+    let timer: NodeJS.Timeout | undefined;
     try {
-      this.debugLog(logHeader, 'start validate');
+      this.logger.debug(logHeader, 'start validate');
       const timeout = new Promise<void>((_, reject) => {
-        setTimeout(() => reject(new Error(`Redis PING timeout after ${REDIS_PING_TIMEOUT_MS}ms`)), REDIS_PING_TIMEOUT_MS);
+        timer = setTimeout(() => reject(new Error(`Redis PING timeout after ${REDIS_PING_TIMEOUT_MS}ms`)), REDIS_PING_TIMEOUT_MS);
       });
       await Promise.race([
         client.ping(),
         timeout
       ]);
-      this.debugLog(logHeader, 'ping succeeded');
+      this.logger.debug(logHeader, 'ping succeeded');
       return client.status === 'ready';
     } catch (error: any) {
-      this.debugLog(logHeader, 'ping failed');
+      // 検証に失敗した接続はプールから破棄される
+      this.logger.warn(logHeader, 'ping failed', error);
       return false;
+    } finally {
+      // PINGが先に応答した場合もタイマーを残さない
+      clearTimeout(timer);
     }
   }
 
-  private debugLog(...args: any[]): void {
-    if (this.debug) {
-      console.debug(...args);
-    }
+  private acquireLog(...args: any[]): void {
+    this.logger[this.acquireLogLevel](...args);
   }
 
   private getPool(): genericPool.Pool<RedisClient> {
@@ -212,18 +258,18 @@ export class RedisPool {
           retryStrategy: (times) => {
             const delay = Math.min(times * 50, 1000);
             if (process.env.NODE_ENV !== 'test') {
-              this.debugLog(logHeader, `retry strategy called ${times} times. delaying ${delay}ms`);
+              this.logger.debug(logHeader, `retry strategy called ${times} times. delaying ${delay}ms`);
             }
             return delay;
           },
           reconnectOnError: (error) => {
-            process.emitWarning(`${logHeader} detected error (on reconnectOnError). ${error.message}`);
+            this.logger.warn(logHeader, 'detected error (on reconnectOnError)', error);
             // フェイルオーバー後にレプリカへ接続したままになっている場合だけ、再接続で解消できる
             return error.message.startsWith('READONLY');
           }
         }) as RedisClient;
         client.on('error', error => {
-          process.emitWarning(`${logHeader} detected error (on error). ${error.message}`);
+          this.logger.error(logHeader, 'detected error (on error)', error);
         });
 
         // カスタムメソッド START
@@ -324,10 +370,10 @@ export class RedisPool {
       destroy: async (client: Redis) => {
         try {
           await client.quit();
-          this.debugLog(logHeader, 'client quit');
+          this.logger.debug(logHeader, 'client quit');
         } catch (error) {
           client.disconnect();
-          this.debugLog(logHeader, 'client disconnected');
+          this.logger.debug(logHeader, 'client disconnected');
         }
       },
       validate: async (client: Redis) => {
