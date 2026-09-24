@@ -124,6 +124,7 @@ Creates a Redis connection pool.
 | `max`            | number  | 10       | Maximum number of clients in the pool. |
 | `min`            | number  | 0        | Minimum number of clients in the pool. |
 | `connectTimeout` | number  | 5000     | Connection timeout in milliseconds.    |
+| `acquireTimeout` | number  | 10000    | Timeout in milliseconds to acquire a client from the pool. |
 | `testOnBorrow`   | boolean | true     | Enable connection validate on borrow.  |
 | `enableTls`      | boolean | false    | Enable TLS for Redis connection.       |
 
@@ -148,6 +149,9 @@ Extends the standard `ioredis` `Redis` client with additional helpers:
 
 This library provides a Redis connection pool capable of managing Redis clients
 connected to different database indexes (`SELECT db`).
+
+All database indexes share a single pool, so `max` is the upper limit of connections to the Redis server.
+The database index is selected every time a client is acquired.
 
 **Calling `acquire(dbIndex)`:**
 

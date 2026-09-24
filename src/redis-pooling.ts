@@ -5,6 +5,7 @@ export interface RedisConfig {
   url: string;
   dbIndex?: number;
   connectTimeout?: number;
+  acquireTimeout?: number;
   max?: number;
   min?: number;
   testOnBorrow?: boolean;
@@ -12,13 +13,13 @@ export interface RedisConfig {
 }
 
 export interface RedisClient extends Redis {
-  getKeys(pattern: string): Promise<string[]>;
-  deleteKeys(pattern: string): Promise<PromiseSettledResult<number>[]>;
-  _originalDbIndex?: number; // 内部状態管理用変数
+  getKeys(pattern: string, count?: number): Promise<string[]>;
+  deleteKeys(pattern: string, count?: number): Promise<PromiseSettledResult<number>[]>;
 }
 
 const logHeader = '[RedisPooling]';
 const DEFAULT_CONNECT_TIMEOUT = 5000;
+const DEFAULT_ACQUIRE_TIMEOUT = 10000;
 const DEFAULT_MAX_POOLING_SIZE = 10;
 const DEFAULT_MIN_POOLING_SIZE = 0;
 const REDIS_PING_TIMEOUT_MS = 3000; // 3秒
@@ -28,12 +29,13 @@ export class RedisPool {
   private readonly url: string;
   private readonly db: number;
   private readonly connectTimeout: number;
+  private readonly acquireTimeout: number;
   private readonly max: number;
   private readonly min: number;
   private readonly testOnBorrow: boolean;
   private readonly tls?: { rejectUnauthorized: false };
 
-  private readonly poolMap = new Map<number, genericPool.Pool<RedisClient>>();
+  private pool?: genericPool.Pool<RedisClient>;
   private initialized = false;
   private readonly debug: boolean;
 
@@ -47,6 +49,7 @@ export class RedisPool {
     this.url = config.url;
     this.db = config.dbIndex ?? 0;
     this.connectTimeout = config.connectTimeout ?? DEFAULT_CONNECT_TIMEOUT;
+    this.acquireTimeout = config.acquireTimeout ?? DEFAULT_ACQUIRE_TIMEOUT;
     this.max = config.max ?? DEFAULT_MAX_POOLING_SIZE;
     this.min = config.min ?? DEFAULT_MIN_POOLING_SIZE;
     this.testOnBorrow = config.testOnBorrow ?? true;
@@ -65,69 +68,55 @@ export class RedisPool {
     }
 
     const index = dbIndex ?? this.db;
-    const pool = this.getPool(index);
+    const pool = this.getPool();
+    const client = await pool.acquire();
     try {
-      const client = await pool.acquire();
-
-      this.debugLog(logHeader, `Redis client ${index} has been acquired.`);
-      return client;
+      // プールの接続は、前の利用者が選択したDBを保持したまま返却される。そのため貸し出すたびに対象のDBを選択する
+      await client.select(index);
     } catch (error) {
+      await pool.destroy(client);
       throw error;
     }
+    this.debugLog(logHeader, `Redis client ${index} has been acquired.`);
+    return client;
   }
 
   public async release(client?: RedisClient): Promise<void> {
-    if (client) {
-      const dbIndex = client._originalDbIndex ?? this.db;
-      const pool = this.poolMap.get(dbIndex);
-      if (!pool) {
-        return;
-      }
-      let needDestroy = false;
-      switch (true) {
-        case client.status === 'end':
-        case client.status === 'close':
-          // Redisクライアントの状態が再利用できない場合はプールから破棄
-          needDestroy = true;
-          break;
-        case client.status === 'ready':
-          try {
-            // 元のDBインデックスに戻す
-            await client.select(dbIndex);
-          } catch (error) {
-            // selectに失敗する→Redisクライアントが不正な状態にあると判断できるのでプールから破棄
-            needDestroy = true;
-          }
-          break;
-        default:
-      }
-      if (needDestroy) {
-        // Redisクライアントの破棄
-        await pool.destroy(client);
-        this.debugLog(logHeader, `Redis client ${dbIndex} destroyed due to invalid status.`);
-      } else {
-        // Redisクライアントの返却
-        await pool.release(client);
-        this.debugLog(logHeader, `Redis client ${dbIndex} released.`);
-      }
+    if (!client || !this.pool) {
+      return;
+    }
+    if (client.status === 'end' || client.status === 'close') {
+      // 再利用できない状態のRedisクライアントはプールから破棄する
+      await this.pool.destroy(client);
+      this.debugLog(logHeader, 'Redis client destroyed due to invalid status.');
+    } else {
+      await this.pool.release(client);
+      this.debugLog(logHeader, 'Redis client released.');
     }
   }
 
   public async destroy(timeoutMs = 5000): Promise<void> {
-    for (const [dbIndex, pool] of this.poolMap.entries()) {
-      this.debugLog(logHeader, `Destroying Redis pool for DB index ${dbIndex}...`);
+    const pool = this.pool;
+    if (!pool) {
+      return;
+    }
+    this.debugLog(logHeader, 'Destroying Redis pool...');
+    let timer: NodeJS.Timeout | undefined;
+    try {
       await Promise.race([
         (async () => {
           await pool.drain();
           await pool.clear();
         })(),
         new Promise<void>((_, reject) => {
-          setTimeout(() => reject(new Error(`${logHeader} Timeout while draining Redis pool for DB index ${dbIndex}`)), timeoutMs);
+          timer = setTimeout(() => reject(new Error(`${logHeader} Timeout while draining Redis pool`)), timeoutMs);
         })
       ]);
-      this.debugLog(logHeader, `Redis pool for DB index ${dbIndex} destroyed.`);
-      this.poolMap.delete(dbIndex);
+    } finally {
+      clearTimeout(timer);
     }
+    this.debugLog(logHeader, 'Redis pool destroyed.');
+    this.pool = undefined;
   }
 
   /**
@@ -144,20 +133,37 @@ export class RedisPool {
       tls: this.tls,
     });
 
-    return new Promise<void>((resolve, reject) => {
-      const cleanup = () => {
-        client.quit().catch(() => client.disconnect());
-      };
+    try {
+      await this.waitForReady(client);
+    } finally {
+      client.quit().catch(() => client.disconnect());
+    }
+  }
 
-      client.once('ready', () => {
+  /**
+   * Redisクライアントの接続が完了するまで待つ。接続に失敗した場合は、そのエラーで reject する
+   *
+   * @param {Redis} client
+   */
+  private async waitForReady(client: Redis): Promise<void> {
+    if (client.status === 'ready') {
+      return;
+    }
+    return new Promise<void>((resolve, reject) => {
+      const onReady = () => {
         cleanup();
         resolve();
-      });
-
-      client.once('error', (error) => {
+      };
+      const onError = (error: Error) => {
         cleanup();
         reject(error);
-      });
+      };
+      const cleanup = () => {
+        client.off('ready', onReady);
+        client.off('error', onError);
+      };
+      client.once('ready', onReady);
+      client.once('error', onError);
     });
   }
 
@@ -185,20 +191,18 @@ export class RedisPool {
     }
   }
 
-  private getPool(dbIndex: number): genericPool.Pool<RedisClient> {
-    let pool = this.poolMap.get(dbIndex);
-    if (!pool) {
-      pool = this.createSingleDbPool(dbIndex);
-      this.poolMap.set(dbIndex, pool);
+  private getPool(): genericPool.Pool<RedisClient> {
+    if (!this.pool) {
+      this.pool = this.createPool();
     }
-    return pool;
+    return this.pool;
   }
 
-  private createSingleDbPool(dbIndex: number): genericPool.Pool<RedisClient> {
+  private createPool(): genericPool.Pool<RedisClient> {
     const factory: genericPool.Factory<RedisClient> = {
       create: async (): Promise<RedisClient> => {
         const client = new Redis(this.url, {
-          db: dbIndex,
+          db: this.db,
           connectTimeout: this.connectTimeout,
           keepAlive: 1,
           enableOfflineQueue: true,
@@ -212,11 +216,10 @@ export class RedisPool {
           },
           reconnectOnError: (error) => {
             process.emitWarning(`${logHeader} detected error (on reconnectOnError). ${error.message}`);
-            return true;
+            // フェイルオーバー後にレプリカへ接続したままになっている場合だけ、再接続で解消できる
+            return error.message.startsWith('READONLY');
           }
         }) as RedisClient;
-
-        client._originalDbIndex = dbIndex;
         client.on('error', error => {
           process.emitWarning(`${logHeader} detected error (on error). ${error.message}`);
         });
@@ -230,13 +233,14 @@ export class RedisPool {
          * 指定されたパターンに一致するキーを Redis から全て取得する
          *
          * @param {string} pattern
+         * @param {number} [count] 1度にスキャンする件数 デフォルト:1000
          * @returns {Promise<string[]>}
          */
-        client.getKeys = async function(pattern: string): Promise<string[]> {
+        client.getKeys = async function(pattern: string, count?: number): Promise<string[]> {
           const allKeys: string[] = [];
           const stream = this.scanStream({
             match: pattern,
-            count: 1000 // ioredisが1度にスキャンする件数の目安。1000件を超えるデータがあっても全件返却される
+            count: count ?? 1000
           });
 
           return new Promise((resolve, reject) => {
@@ -245,8 +249,8 @@ export class RedisPool {
                 allKeys.push(...keys);
               }
             });
-            stream.on('end', () => resolve(allKeys));
-            stream.on('error', (err: Error) => {
+            stream.once('end', () => resolve(allKeys));
+            stream.once('error', (err: Error) => {
               reject(err);
             });
           });
@@ -267,54 +271,54 @@ export class RedisPool {
          *   .reduce((acc, cur) => acc + (cur as PromiseFulfilledResult<number>).value, 0);
          *
          * @param {string} pattern
+         * @param {number} [count] 1度にスキャンする件数 デフォルト:1000
          * @returns {Promise<PromiseSettledResult<number>>}
          */
-        client.deleteKeys = async function(pattern: string): Promise<PromiseSettledResult<number>[]> {
+        client.deleteKeys = async function(pattern: string, count?: number): Promise<PromiseSettledResult<number>[]> {
           const stream = this.scanStream({
             match: pattern,
-            count: 1000 // 1度にスキャンする件数
+            count: count ?? 1000
           });
+          const results: PromiseSettledResult<number>[] = [];
 
           return new Promise((resolve, reject) => {
-            const tasks: Promise<number>[] = [];
             stream.on('data', async (keys: string[]) => {
               if (keys.length) {
-                tasks.push((async () => {
+                stream.pause();
+                try {
                   // UNLINK を使用し、現在のインスタンス (this) で実行
                   const unlinkResult = await this.unlink(...keys);
-                  return unlinkResult;
-                })());
+                  results.push({
+                    status: 'fulfilled',
+                    value: unlinkResult
+                  });
+                } catch (err) {
+                  results.push({
+                    status: 'rejected',
+                    reason: err
+                  });
+                } finally {
+                  stream.resume();
+                }
               }
             });
-            stream.on('end', async () => {
-              const results = await Promise.allSettled(tasks);
+            stream.once('end', async () => {
               resolve(results);
             });
-            stream.on('error', (err: Error) => {
+            stream.once('error', (err: Error) => {
               reject(err);
             });
           });
         };
         // カスタムメソッド END
 
-        // 接続が不安定な場合は以下のロジックが生きるかもしれないので残しておく
-        // 動作確認した限りでは以下のロジックはなくても問題なく動作する
-        // await new Promise<void>((resolve, reject) => {
-        //   const onReady = () => {
-        //     cleanup();
-        //     resolve();
-        //   };
-        //   const onError = (error: Error) => {
-        //     cleanup();
-        //     reject(error);
-        //   };
-        //   const cleanup = () => {
-        //     client.off('ready', onReady);
-        //     client.off('error', onError);
-        //   };
-        //   client.once('ready', onReady);
-        //   client.once('error', onError);
-        // });
+        try {
+          await this.waitForReady(client);
+        } catch (error) {
+          // 接続できなかったクライアントはプールに入れない。ioredisの再接続も止める
+          client.disconnect();
+          throw error;
+        }
 
         return client;
       },
@@ -335,7 +339,8 @@ export class RedisPool {
     return genericPool.createPool(factory, {
       max: this.max,
       min: this.min,
-      testOnBorrow: this.testOnBorrow
+      testOnBorrow: this.testOnBorrow,
+      acquireTimeoutMillis: this.acquireTimeout
     });
   }
 }

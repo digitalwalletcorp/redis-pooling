@@ -60,7 +60,6 @@ describe.skip('Redis Pooling Real Connectivity Tests', () => {
           }
         ]);
         const succeeded = delResults.filter(a => a.status === 'fulfilled');
-        console.log(succeeded.map(a => a.value));
         expect(succeeded.length).toBe(1);
         const delCount = succeeded.reduce((acc, cur) => acc + (cur as PromiseFulfilledResult<number>).value, 0);
         expect(delCount).toBe(2);
@@ -139,7 +138,7 @@ describe.skip('Redis Pooling Real Connectivity Tests', () => {
       const client = await pool.acquire(1);
       try {
         // クライアントリリース前にプールを破棄
-        await expect(pool.destroy(100)).rejects.toThrow('Timeout while draining Redis pool for DB index 1');
+        await expect(pool.destroy(100)).rejects.toThrow('Timeout while draining Redis pool');
       } finally {
         await pool.release(client);
       }
@@ -148,7 +147,6 @@ describe.skip('Redis Pooling Real Connectivity Tests', () => {
     it('pool作成時のDBインデックスがデフォルトで設定される', async () => {
       // テスト用乱数生成
       const randomValue = Math.random().toString(36).slice(2, 12);
-      console.log(randomValue);
 
       // 初期インデックス2で別のプールを作成
       const url = process.env.REDIS_URL as string;
