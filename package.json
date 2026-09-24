@@ -1,11 +1,12 @@
 {
   "name": "@digitalwalletcorp/redis-pooling",
-  "version": "1.2.0",
+  "version": "1.3.0",
   "description": "This is a library for redis connection pooling",
   "main": "lib/index.js",
   "types": "lib/index.d.ts",
   "scripts": {
     "build": "tsc --project tsconfig.build.json",
+    "install:dev": "rm -rf lib dest && find node_modules -mindepth 1 -delete && yarn install",
     "version:patch": "npm version patch",
     "version:minor": "npm version minor",
     "version:major": "npm version major",
@@ -32,18 +33,20 @@
     "lib/**/*",
     "src/**/*"
   ],
+  "peerDependencies": {
+    "generic-pool": ">=3.9.0",
+    "ioredis": ">=5.0.0"
+  },
   "devDependencies": {
     "@types/ioredis-mock": "^8.2.6",
     "@types/jest": "^30.0.0",
+    "generic-pool": "^3.9.0",
+    "ioredis": "^5.9.2",
     "ioredis-mock": "^8.13.1",
     "jest": "^30.3.0",
     "ts-jest": "^29.4.9",
     "ts-node": "^10.9.2",
     "tsconfig-paths": "^4.2.0",
     "typescript": "^6.0.3"
-  },
-  "dependencies": {
-    "generic-pool": "^3.9.0",
-    "ioredis": "^5.9.2"
   }
 }

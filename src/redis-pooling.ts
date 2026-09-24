@@ -12,6 +12,10 @@ export interface RedisConfig {
   enableTls?: boolean;
 }
 
+export interface RedisPoolOptions {
+  debug?: boolean;
+}
+
 export interface RedisClient extends Redis {
   getKeys(pattern: string, count?: number): Promise<string[]>;
   deleteKeys(pattern: string, count?: number): Promise<PromiseSettledResult<number>[]>;
@@ -39,9 +43,7 @@ export class RedisPool {
   private initialized = false;
   private readonly debug: boolean;
 
-  constructor(config: RedisConfig, options?: {
-    debug?: boolean;
-  }) {
+  constructor(config: RedisConfig, options?: RedisPoolOptions) {
     if (!config.url) {
       throw new Error(`${logHeader} Redis connection url is required.`);
     }
@@ -185,7 +187,7 @@ export class RedisPool {
     }
   }
 
-  public debugLog(...args: any[]): void {
+  private debugLog(...args: any[]): void {
     if (this.debug) {
       console.debug(...args);
     }
@@ -223,9 +225,6 @@ export class RedisPool {
         client.on('error', error => {
           process.emitWarning(`${logHeader} detected error (on error). ${error.message}`);
         });
-
-        // カスタムメソッド内の処理でthis.debugLogなどが参照できなくなるため、poolのインスタンスを変数キャプチャする
-        const poolInstance = this;
 
         // カスタムメソッド START
 
