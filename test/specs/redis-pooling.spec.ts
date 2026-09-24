@@ -48,7 +48,7 @@ describe('Redis Pooling Mock Tests', () => {
       const client = await pool.acquire();
       await client.set('user:1', 'Alice');
       await client.set('user:2', 'Bob');
-      const keys = await client.getKeys('user:*');
+      const keys = await client.getKeys('user:*', 5000);
       expect(keys).toEqual(expect.arrayContaining(['user:1', 'user:2']));
 
       await pool.release(client);
@@ -60,7 +60,7 @@ describe('Redis Pooling Mock Tests', () => {
       await client.set('delete:2', 'y');
       await client.set('keep:1', 'z');
 
-      const delResults = await client.deleteKeys('delete:*');
+      const delResults = await client.deleteKeys('delete:*', 5000);
       expect(delResults).toEqual([
         {
           status: 'fulfilled',
@@ -100,6 +100,36 @@ describe('Redis Pooling Mock Tests', () => {
       await pool.release(client2);
     });
 
+    it('acquire selects the requested db index every time', async () => {
+      const client1 = await pool.acquire(3);
+      const selectSpy = jest.spyOn(client1, 'select');
+      await pool.release(client1);
+
+      const client2 = await pool.acquire();
+      expect(client2).toBe(client1);
+      expect(selectSpy).toHaveBeenLastCalledWith(0);
+      await pool.release(client2);
+
+      const client3 = await pool.acquire(5);
+      expect(client3).toBe(client1);
+      expect(selectSpy).toHaveBeenLastCalledWith(5);
+      await pool.release(client3);
+    });
+
+    it('clients are shared across db indexes within max', async () => {
+      const client1 = await pool.acquire(1);
+      const client2 = await pool.acquire(2);
+      await pool.release(client1);
+      await pool.release(client2);
+
+      const client3 = await pool.acquire(3);
+      const client4 = await pool.acquire(4);
+      expect([client1, client2]).toContain(client3);
+      expect([client1, client2]).toContain(client4);
+      await pool.release(client3);
+      await pool.release(client4);
+    });
+
     it('release without client does not throw', async () => {
       await expect(pool.release(undefined)).resolves.toBeUndefined();
     });
@@ -121,6 +151,22 @@ describe('Redis Pooling Mock Tests', () => {
 
     afterEach(async () => {
       await pool.destroy();
+    });
+
+    it('acquire times out when all clients are in use', async () => {
+      const timeoutPool = new RedisPool({
+        url: redisUrl,
+        max: 1,
+        testOnBorrow: false,
+        acquireTimeout: 100
+      });
+      const client = await timeoutPool.acquire();
+      try {
+        await expect(timeoutPool.acquire()).rejects.toThrow('ResourceRequest timed out');
+      } finally {
+        await timeoutPool.release(client);
+        await timeoutPool.destroy();
+      }
     });
 
     it('incorrect url', () => {
