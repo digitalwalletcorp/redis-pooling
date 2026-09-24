@@ -9,7 +9,7 @@ const prefix = 'redis-pooling-test';
  * Redisへの実接続テスト
  * GitHub-CI上ではRedisに接続できないのでコミット時は`skip`を付与
  */
-describe('Redis Pooling Real Connectivity Tests', () => {
+describe.skip('Redis Pooling Real Connectivity Tests', () => {
 
   describe('Real connectivity', () => {
     let pool: RedisPool;
