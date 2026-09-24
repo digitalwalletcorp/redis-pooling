@@ -12,6 +12,7 @@ Designed for both server-side Node.js applications and cron-style background job
 * **Custom Utilities**: Built-in helper methods like `getKeys(pattern)` and `deleteKeys(pattern)` for convenient Redis key operations.
 * **Connection Validation**: PING-based validation with timeout before borrowing from the pool.
 * **TLS Support**: Optional TLS configuration for secure Redis connections.
+* **Pluggable Logging**: Pass your own logger (`debug` / `info` / `warn` / `error`) to route logs into your application's logging. Without one, `debug` / `info` logs go to the console when `debug` is enabled and warnings go through `process.emitWarning`.
 
 #### 📦 Installation
 
@@ -113,7 +114,7 @@ async function manageCache() {
 
 #### 📚 API Reference
 
-##### `new RedisPool(config: RedisConfig)`
+##### `new RedisPool(config: RedisConfig, options?: RedisPoolOptions)`
 
 Creates a Redis connection pool.
 
@@ -127,6 +128,35 @@ Creates a Redis connection pool.
 | `acquireTimeout` | number  | 10000    | Timeout in milliseconds to acquire a client from the pool. |
 | `testOnBorrow`   | boolean | true     | Enable connection validate on borrow.  |
 | `enableTls`      | boolean | false    | Enable TLS for Redis connection.       |
+
+`RedisPoolOptions`:
+
+| Property          | Type                 | Default   | Description                                                                                                   |
+| ----------------- | -------------------- | --------- | ------------------------------------------------------------------------------------------------------------- |
+| `logger`          | `RedisPoolLogger`    | -         | Destination of all logs. When given, the logger decides which levels are output (`debug` is ignored).         |
+| `debug`           | boolean              | false     | Only used without `logger`. When `true`, `debug` / `info` logs are written to `console.debug` / `console.info`. |
+| `acquireLogLevel` | `'debug' \| 'info'`  | `'debug'` | Level used for client acquire / release logs.                                                                 |
+
+`RedisPoolLogger`:
+
+```typescript
+interface RedisPoolLogger {
+  debug(...args: any[]): void;
+  info(...args: any[]): void;
+  warn(...args: any[]): void;
+  error(...args: any[]): void;
+}
+```
+
+Each log is called with the header `'[RedisPooling]'`, a message, and optional details, e.g. `logger.error('[RedisPooling]', 'detected error (on error)', error)`.
+
+| Level            | Messages                                                                                                        |
+| ---------------- | --------------------------------------------------------------------------------------------------------------- |
+| `debug` / `info` | `Redis client N has been acquired.`, `Redis client released.`, `Redis client destroyed due to invalid status.` (chosen by `acquireLogLevel`) |
+| `info`           | `Destroying Redis pool...`, `Redis pool destroyed.`                                                             |
+| `debug`          | `start validate`, `ping succeeded`, `retry strategy called ...`, `client quit`, `client disconnected`           |
+| `warn`           | `ping failed`, `detected error (on reconnectOnError)`                                                            |
+| `error`          | `detected error (on error)`                                                                                     |
 
 ##### `RedisPool` Methods
 
@@ -176,6 +206,7 @@ const client2 = await pool.acquire();
 
 * Always release clients back to the pool using `release(client)` to avoid connection leaks.
 * Use `acquire()` and `release()` inside `try/finally` blocks for safe resource management.
+* Without `logger`, `warn` / `error` logs are emitted via `process.emitWarning` so that callers can suppress them with the `--no-warnings` flag (e.g. `node --no-warnings app.js`, or `NODE_OPTIONS=--no-warnings`) or handle them with `process.on('warning')`.
 
 #### 📜 License
 
