@@ -14,6 +14,5 @@
       "source.fixAll.stylelint": "never"
     }
   },
-  "typescript.preferences.quoteStyle": "single",
-  "javascript.preferences.quoteStyle": "single"
+  "js/ts.preferences.quoteStyle": "single"
 }
